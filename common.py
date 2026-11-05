@@ -249,7 +249,7 @@ def is_vllm_rejection(error):
 
 
 class VLLMModel:
-    def __init__(self, model, max_tokens=512, temperature=0.0, tp=1, max_model_len=8192):
+    def __init__(self, model, max_tokens=512, temperature=0.0, tp=1, max_model_len=8192, thinking=False):
         from vllm import LLM, SamplingParams
         print(f"loading {model} with vLLM (first time downloads it; 1-5 min, quiet at first)...", flush=True)
         self.llm = LLM(model=model, tensor_parallel_size=tp, max_model_len=max_model_len,
@@ -258,7 +258,7 @@ class VLLMModel:
         self.params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
         self.max_tokens = max_tokens
         self.max_model_len = max_model_len
-        self.template_kwargs = {"enable_thinking": False}
+        self.template_kwargs = {"enable_thinking": thinking}
         self.warned_template = False
 
     def prompt_fits(self, tokenizer, conv):
@@ -309,9 +309,12 @@ class VLLMModel:
         for result in results:
             text = result["text"]
             if "</think>" in text:
-                result["text"] = text.split("</think>", 1)[1].strip()
+                trace, answer = text.split("</think>", 1)
+                result["text"] = answer.strip()
+                result["thinking"] = trace.replace("<think>", "", 1).strip()
             elif text.lstrip().startswith("<think>"):
                 result["finish_reason"] = "thinking_cut_off"
+                result["thinking"] = text.replace("<think>", "", 1).strip()
                 n_cut += 1
         if n_cut:
             print(f"WARNING: {n_cut}/{len(results)} replies were still reasoning at the token limit "
@@ -453,10 +456,12 @@ class ClaudeModel:
             return list(pool.map(self.replay_one, turn_lists))
 
 
-def load_model(backend, model, max_tokens=512, temperature=0.0, tp=1, max_model_len=8192):
+def load_model(backend, model, max_tokens=512, temperature=0.0, tp=1, max_model_len=8192, thinking=False):
     if backend == "vllm":
         return VLLMModel(model, max_tokens=max_tokens, temperature=temperature, tp=tp,
-                         max_model_len=max_model_len)
+                         max_model_len=max_model_len, thinking=thinking)
+    if thinking:
+        raise SystemExit("ERROR: thinking mode is only supported with the vllm backend")
     if backend == "claude":
         return ClaudeModel(model)
     raise SystemExit(f"ERROR: unknown backend {backend} (use vllm or claude)")
@@ -508,14 +513,14 @@ def replay_rows(batch, outputs):
 
 
 def generate(model, condition, records, build_messages=None, backend="vllm", tag="", max_tokens=512,
-             tp=1, max_model_len=8192, chunk=10, replay=False):
+             tp=1, max_model_len=8192, chunk=10, replay=False, thinking=False):
     out = generation_path(model, condition, tag)
     done = done_keys(out)
     todo = [r for r in records if (r["pid"], r["lang"]) not in done]
     print(f"{len(records)} items, {len(done)} done, {len(todo)} to run -> {out}")
     if not todo:
         return out
-    llm = load_model(backend, model, max_tokens=max_tokens, tp=tp, max_model_len=max_model_len)
+    llm = load_model(backend, model, max_tokens=max_tokens, tp=tp, max_model_len=max_model_len, thinking=thinking)
     if backend == "vllm":
         step = len(todo)
     else:
@@ -529,9 +534,12 @@ def generate(model, condition, records, build_messages=None, backend="vllm", tag
             outputs = llm.generate([build_messages(r) for r in batch])
         rows = []
         for record, output in zip(batch, outputs):
-            rows.append(dict(record, model=model, backend=backend, condition=condition,
-                             response=output["text"], finish_reason=output["finish_reason"],
-                             ts=time.strftime("%Y-%m-%d %H:%M:%S")))
+            row = dict(record, model=model, backend=backend, condition=condition,
+                       response=output["text"], finish_reason=output["finish_reason"],
+                       ts=time.strftime("%Y-%m-%d %H:%M:%S"))
+            if thinking:
+                row["thinking"] = output.get("thinking")
+            rows.append(row)
         good = [row for row in rows if not is_failed(row["finish_reason"])]
         n_failed = len(rows) - len(good)
         append_jsonl(out, good)

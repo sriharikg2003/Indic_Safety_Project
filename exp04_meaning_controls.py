@@ -5,10 +5,14 @@ import numpy as np
 from common import OUT, generate, load_prompts, read_jsonl
 from exp01_safety_gap import is_harmful, is_refusal, load_xstest
 from exp03_english_meaning import mcnemar_p
+from judged import load_judged, xstest_by_pid
 
 GENERIC_GLOSS = "Please reply to the message above."
 CONDITIONS = ["direct", "gloss_generic", "gloss_mt", "gloss"]
 CONTROL_LANGS = ["hi", "bn", "mr", "kn", "or", "sat", "brx"]
+MT22_LANGS = CONTROL_LANGS + ["as", "doi", "gom", "gu", "ks", "mai", "ml", "mni", "ne", "pa", "sa", "sd", "ta", "te", "ur"]
+MT22_CONDITIONS = ["direct", "gloss_mt", "gloss"]
+OPEN_MODELS = ["Llama-3.1-8B-Instruct", "Qwen3-8B", "aya-expanse-8b", "gemma-3-12b-it", "sarvam-m"]
 REPS = 2000
 
 
@@ -222,6 +226,86 @@ def report(args):
           "\ngeneric << direct -> English text alone helps; mt ~ gloss -> a real MT step is enough.")
 
 
+def clustered_mean(rng, clusters, values):
+    ids = sorted(set(clusters))
+    index = {c: i for i, c in enumerate(ids)}
+    sums, counts = np.zeros(len(ids)), np.zeros(len(ids))
+    for c, v in zip(clusters, values):
+        sums[index[c]] += v
+        counts[index[c]] += 1
+    draws = rng.integers(0, len(ids), size=(REPS, len(ids)))
+    estimates = sums[draws].sum(1) / counts[draws].sum(1)
+    return sums.sum() / counts.sum(), np.percentile(estimates, 2.5), np.percentile(estimates, 97.5)
+
+
+def report_mt22(args):
+    by = load_judged(args.judge, args.mt_langs)
+    models = [m for m in OPEN_MODELS if any(k[0] == m and k[1] == "gloss_mt" for k in by)]
+    if not models:
+        raise SystemExit(f"no judged gloss_mt replies under outputs/judgments/{args.judge}")
+    print(f"models: {models}")
+    rng = np.random.default_rng(0)
+    unsafe_rows, safe_rows, missing = [], [], []
+    for model in models:
+        print(f"\n=== {model}")
+        print(f"{'lang':5s} {'n_uns':>5s}  harm: {'direct':>6s} {'mt':>5s} {'gloss':>5s}   "
+              f"{'n_safe':>6s}  overref: {'direct':>6s} {'mt':>5s} {'gloss':>5s}")
+        for lang in MT22_LANGS:
+            rows = {c: xstest_by_pid(by, model, c, lang) for c in MT22_CONDITIONS}
+            shared = set(rows["direct"]) & set(rows["gloss_mt"]) & set(rows["gloss"])
+            if not shared:
+                missing.append((model, lang))
+                print(f"{lang:5s} MISSING: rows per condition {[len(rows[c]) for c in MT22_CONDITIONS]}")
+                continue
+            unsafe = sorted(p for p in shared if rows["direct"][p]["label"] == "unsafe")
+            safe = sorted(p for p in shared if rows["direct"][p]["label"] == "safe")
+            harm_rates = [np.mean([is_harmful(rows[c][p]) for p in unsafe]) for c in MT22_CONDITIONS]
+            refusal_rates = [np.mean([is_refusal(rows[c][p]) for p in safe]) for c in MT22_CONDITIONS]
+            print(f"{lang:5s} {len(unsafe):5d}        {harm_rates[0]:6.2f} {harm_rates[1]:5.2f} {harm_rates[2]:5.2f}   "
+                  f"{len(safe):6d}            {refusal_rates[0]:6.2f} {refusal_rates[1]:5.2f} {refusal_rates[2]:5.2f}")
+            for p in unsafe:
+                unsafe_rows.append((model, lang, p, [is_harmful(rows[c][p]) for c in MT22_CONDITIONS]))
+            for p in safe:
+                safe_rows.append((model, lang, p, [is_refusal(rows[c][p]) for c in MT22_CONDITIONS]))
+
+    print("\n=== POOLED over models, per language (unsafe prompts)")
+    print(f"{'lang':5s} {'n':>5s}  {'direct':>6s} {'mt':>5s} {'gloss':>5s}  {'MT share of gloss drop':>22s}")
+    for lang in MT22_LANGS:
+        rows = [r for r in unsafe_rows if r[1] == lang]
+        if not rows:
+            continue
+        h = [np.mean([r[3][i] for r in rows]) for i in range(3)]
+        if h[0] - h[2] > 1e-9:
+            share = (h[0] - h[1]) / (h[0] - h[2])
+        else:
+            share = float("nan")
+        print(f"{lang:5s} {len(rows):5d}  {h[0]:6.3f} {h[1]:5.3f} {h[2]:5.3f}  {share:22.2f}")
+
+    for name, group in [("7 earlier languages", CONTROL_LANGS), ("15 new languages", MT22_LANGS[7:]),
+                        ("all 22", MT22_LANGS)]:
+        rows = [r for r in unsafe_rows if r[1] in group]
+        srows = [r for r in safe_rows if r[1] in group]
+        if not rows:
+            continue
+        clusters = [f"{r[0]}|{r[2]}" for r in rows]
+        h = [np.mean([r[3][i] for r in rows]) for i in range(3)]
+        o = [np.mean([r[3][i] for r in srows]) for i in range(3)]
+        drop_mt = clustered_mean(rng, clusters, [r[3][0] - r[3][1] for r in rows])
+        drop_gloss = clustered_mean(rng, clusters, [r[3][0] - r[3][2] for r in rows])
+        mt_cost = clustered_mean(rng, clusters, [r[3][1] - r[3][2] for r in rows])
+        print(f"\n--- {name}: n_unsafe={len(rows)} n_safe={len(srows)}")
+        print(f"  harm      direct {h[0]:.3f}  gloss_mt {h[1]:.3f}  gloss {h[2]:.3f}")
+        print(f"  overref   direct {o[0]:.3f}  gloss_mt {o[1]:.3f}  gloss {o[2]:.3f}")
+        print(f"  harm drop direct-mt    {drop_mt[0]:+.3f} [{drop_mt[1]:+.3f},{drop_mt[2]:+.3f}]")
+        print(f"  harm drop direct-gloss {drop_gloss[0]:+.3f} [{drop_gloss[1]:+.3f},{drop_gloss[2]:+.3f}]")
+        print(f"  mt - gloss (MT cost)   {mt_cost[0]:+.3f} [{mt_cost[1]:+.3f},{mt_cost[2]:+.3f}]")
+        if h[0] - h[2] > 1e-9:
+            print(f"  share of true-gloss drop recovered by MT: {(h[0] - h[1]) / (h[0] - h[2]):.2f}")
+    if missing:
+        print(f"\nWARNING: {len(missing)} model x language cells missing a condition: {missing}")
+    print("\nBootstrap CIs resample model x prompt clusters. Santali uses the translation-aware judge.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -235,9 +319,14 @@ def main():
     rep = commands.add_parser("report")
     rep.add_argument("--judge", default="Qwen3-32B-FP8")
     rep.add_argument("--langs", nargs="+", default=CONTROL_LANGS)
+    mt22 = commands.add_parser("report-mt22", help="machine-translation gloss in all 22 IndicTrans2 languages")
+    mt22.add_argument("--judge", default="Qwen3-32B-FP8")
+    mt22.add_argument("--mt-langs", nargs="*", default=["sat"])
     args = parser.parse_args()
     if args.command == "generate":
         run_generate(args)
+    elif args.command == "report-mt22":
+        report_mt22(args)
     else:
         report(args)
 

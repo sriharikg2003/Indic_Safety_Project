@@ -4,13 +4,14 @@ from pathlib import Path
 from common import OUT, SOURCE_OF_PREFIX, bad_pids, read_jsonl
 
 BAD = bad_pids()
+EXTRA_JUDGE_FILES = {"severity", "severity_mt", "trace"}  # exp16 / exp17 outputs, not reply verdicts
 
 
 def read_judged(judge):
     by = {}
     for path in glob.glob(str(OUT / "judgments" / judge / "*" / "*.jsonl")):
         folder = Path(path).parent.name
-        if folder.startswith("xstest_human"):
+        if folder.startswith("xstest_human") or Path(path).stem in EXTRA_JUDGE_FILES:
             continue
         for row in read_jsonl(path):
             if row["pid"] in BAD:

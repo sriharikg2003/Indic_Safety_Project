@@ -1,6 +1,8 @@
 import argparse
+import csv
+from collections import defaultdict
 
-from common import (CORE_LANGS, LANGS, OUT, SOURCE_OF_PREFIX, bad_pids, direct_messages, generate, load_base,
+from common import (CORE_LANGS, DATA, LANGS, OUT, SOURCE_OF_PREFIX, bad_pids, direct_messages, generate, load_base,
                     load_prompts, read_jsonl)
 from exp01_safety_gap import MT_LANGS, is_harmful, is_refusal
 from exp03_english_meaning import mcnemar_p
@@ -8,6 +10,20 @@ from exp03_english_meaning import mcnemar_p
 MIN_PAIRED = 20
 BASE = load_base()
 BAD = bad_pids(BASE)
+OPEN_MODELS = ["Llama-3.1-8B-Instruct", "Qwen3-8B", "aya-expanse-8b", "gemma-3-12b-it", "sarvam-m"]
+TACTIC_FAMILIES = {
+    "roleplay and fiction": ["roleplay", "role-play", "fiction", "story", "storytelling", "narrative",
+                             "character", "alternate reality", "backstory", "persona", "game", "scenario"],
+    "justification": ["justification", "legitimiz", "legaliz", "normaliz", "ethical", "research",
+                      "educational", "historical", "medical", "academic", "scientific"],
+    "authority and pressure": ["empower", "authority", "threat", "command", "reset", "termination",
+                               "override", "bypass", "permission", "consent", "compliance", "rule"],
+    "distraction and nesting": ["distract", "nested", "folding", "style", "format", "constraint",
+                                "templated", "seed", "list", "instruction"],
+    "politeness and emotion": ["polite", "emotional", "sympath", "urgency", "plea", "flattery"],
+    "obfuscation": ["pseudonym", "coded", "euphemis", "obfusc", "surrogate", "implicit", "indirect",
+                    "misdirection", "vague", "ambigu", "code word"],
+}
 
 
 def read_by_source(path):
@@ -153,6 +169,89 @@ def report(args):
     print_probe_note()
 
 
+def families_of(tactic_text):
+    tactics = [t.strip().lower() for t in tactic_text.split("|") if t.strip()]
+    found = set()
+    for family, words in TACTIC_FAMILIES.items():
+        if any(word in tactic for tactic in tactics for word in words):
+            found.add(family)
+    return found or {"other"}
+
+
+def wjb_verdicts(judge, model):
+    rows = {}
+    for row in read_jsonl(OUT / "judgments" / judge / model / "direct.jsonl"):
+        if row["pid"][0] in "wv" and row["pid"] not in BAD:
+            rows[(row["pid"], row["lang"])] = row
+    return rows
+
+
+def tactics_report(args):
+    path = DATA / "wjb_prompts.csv"
+    if not path.exists():
+        raise SystemExit(f"ERROR: {path} missing")
+    with open(path, encoding="utf-8") as f:
+        prompts = list(csv.DictReader(f))
+    family = {p["pid"]: families_of(p["tactic"]) for p in prompts}
+    plain_of = {p["pid"]: p["focus"] for p in prompts}
+    print(f"WildJailbreak disguised prompts: {len(prompts)}, with tactic labels: "
+          f"{sum(1 for p in prompts if p['tactic'].strip())}")
+    sizes = defaultdict(int)
+    for families in family.values():
+        for f in families:
+            sizes[f] += 1
+    print("prompts per tactic family (a prompt can be in several):")
+    for f in sorted(sizes, key=lambda f: -sizes[f]):
+        print(f"  {f:26s} {sizes[f]:4d}")
+    pooled = defaultdict(lambda: [0, 0, 0])
+    per_model = defaultdict(lambda: [0, 0, 0])
+    for model in OPEN_MODELS:
+        native = wjb_verdicts(args.judge, model)
+        if not native:
+            print(f"WARNING: no WildJailbreak verdicts for {model}")
+        with_mt = wjb_verdicts(args.judge + "+mt", model)
+        for (pid, lang), row in native.items():
+            if not pid.startswith("w") or row.get("label") != "unsafe":
+                continue
+            if lang in args.mt_langs:
+                verdicts = with_mt
+            else:
+                verdicts = native
+            disguised = verdicts.get((pid, lang))
+            plain = verdicts.get((plain_of.get(pid, ""), lang))
+            if disguised is None or plain is None:
+                continue
+            side = "English" if lang == "en" else "Indian"
+            for f in family.get(pid, {"other"}):
+                for key, table in [((f, side), pooled), ((model, f, side), per_model)]:
+                    table[key][0] += is_harmful(plain)
+                    table[key][1] += is_harmful(disguised)
+                    table[key][2] += 1
+    print("\nASR plain -> disguised by tactic family, five open models pooled (unsafe prompts)")
+    print(f"{'family':26s} {'English n':>9s} {'plain':>6s} {'disg':>6s} {'x':>5s}   "
+          f"{'Indian n':>8s} {'plain':>6s} {'disg':>6s} {'x':>5s}")
+    for f in sorted(sizes, key=lambda f: -sizes[f]):
+        cells = []
+        for side in ["English", "Indian"]:
+            plain, disguised, n = pooled[(f, side)]
+            if n == 0:
+                cells.append(f"{0:9d} {'-':>6s} {'-':>6s} {'-':>5s}")
+                continue
+            ratio = f"{disguised / plain:.1f}" if plain else "inf"
+            cells.append(f"{n:9d} {plain / n:6.2f} {disguised / n:6.2f} {ratio:>5s}")
+        print(f"{f:26s} {cells[0]}   {cells[1]}")
+    print("\nper model, Indian forms only: ASR plain -> disguised")
+    print(f"{'family':26s} " + " ".join(f"{m[:12]:>14s}" for m in OPEN_MODELS))
+    for f in sorted(sizes, key=lambda f: -sizes[f]):
+        cells = []
+        for model in OPEN_MODELS:
+            plain, disguised, n = per_model[(model, f, "Indian")]
+            cells.append(f"{plain / n:.2f}->{disguised / n:.2f}".rjust(14) if n else "-".rjust(14))
+        print(f"{f:26s} " + " ".join(cells))
+    print("\nTactic families are keyword groups over WildJailbreak's free-text tactic labels;"
+          "\nfamilies overlap, so rows are not independent. x = disguised / plain ASR.")
+
+
 def run_generate(args):
     records = load_prompts(args.langs)
     records = [r for r in records if r["source"] in args.sources]
@@ -170,9 +269,14 @@ def main():
     gen.add_argument("--tp", type=int, default=1)
     rep = commands.add_parser("report")
     rep.add_argument("--judge", default="Qwen3-32B-FP8")
+    tac = commands.add_parser("tactics", help="ASR plain -> disguised per WildJailbreak tactic family")
+    tac.add_argument("--judge", default="Qwen3-32B-FP8")
+    tac.add_argument("--mt-langs", nargs="*", default=MT_LANGS)
     args = parser.parse_args()
     if args.command == "generate":
         run_generate(args)
+    elif args.command == "tactics":
+        tactics_report(args)
     else:
         report(args)
 
