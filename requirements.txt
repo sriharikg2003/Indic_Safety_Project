@@ -1,0 +1,8 @@
+vllm==0.11.0
+transformers>=4.56,<5
+sentencepiece
+IndicTransToolkit
+huggingface_hub
+sacrebleu>=2.4
+matplotlib>=3.8
+statsmodels

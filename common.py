@@ -337,6 +337,9 @@ def claude_session_files(session_id):
     return glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl"))
 
 
+POLICY_BLOCK = "api_policy_block"
+
+
 def run_claude(cmd, text, timeout):
     error = ""
     for attempt in range(3):
@@ -345,6 +348,15 @@ def run_claude(cmd, text, timeout):
         except subprocess.TimeoutExpired:
             error = f"timeout after {timeout} s"
         else:
+            both = (result.stdout or "") + " " + (result.stderr or "")
+            if "anthropic.com/legal/aup" in both or "Usage Policy" in both or "safeguards flagged" in both:
+                # the provider's usage-policy filter blocked the request: saved as an outcome after 3 blocked tries
+                if attempt < 2:   # some safeguard flags are not repeatable: save as blocked only if all 3 tries are blocked
+                    print(f"  claude blocked by provider filter, try {attempt + 1}/3: {both.strip()[:120]}", flush=True)
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                print(f"  claude API_POLICY_BLOCK 3/3 (saved as api_policy_block): {both.strip()[:160]}", flush=True)
+                return None, POLICY_BLOCK
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout, None
             error = (result.stderr or result.stdout or f"exit {result.returncode}, empty reply").strip()[:200]
@@ -370,6 +382,8 @@ class ClaudeModel:
         cmd = ["claude", "-p", "--model", self.model, "--system-prompt", system,
                "--tools", "", "--no-session-persistence", "--output-format", "text"]
         out, error = run_claude(cmd, user, 300)
+        if error == POLICY_BLOCK:
+            return {"text": "", "finish_reason": POLICY_BLOCK}
         if out is None:
             return {"text": "", "finish_reason": f"ERROR:{error}"}
         return {"text": out.strip(), "finish_reason": "stop"}
@@ -389,6 +403,15 @@ class ClaudeModel:
         rows = read_jsonl(files[0])
         assistant_rows = [row for row in rows if row.get("type") == "assistant"]
         user_rows = [row for row in rows if row.get("type") == "user"]
+        # one reply may be stored as several records (e.g. a thinking block, then the text) sharing a message id
+        if len(assistant_rows) > 1 and len({(row.get("message") or {}).get("id") for row in assistant_rows}) == 1:
+            print(f"  template {session_id[:8]}: assistant reply stored as {len(assistant_rows)} records of one "
+                  f"message; kept one", flush=True)
+            keep = assistant_rows[-1]            # later records point to the last one
+            keep["parentUuid"] = assistant_rows[0].get("parentUuid")
+            dropped = {id(row) for row in assistant_rows[:-1]}
+            rows = [row for row in rows if id(row) not in dropped]
+            assistant_rows = [keep]
         if len(assistant_rows) != 1 or len(user_rows) != 1:
             raise SystemExit(f"ERROR: template {session_id}: expected 1 user + 1 assistant record, got "
                              f"{len(user_rows)} + {len(assistant_rows)}; cannot insert the canned reply safely")
@@ -415,6 +438,8 @@ class ClaudeModel:
         cmd = self.base_command() + ["--resume", session_id, "--fork-session", "--no-session-persistence",
                                      "--output-format", "text"]
         out, error = run_claude(cmd, conv[2]["content"], 600)
+        if error == POLICY_BLOCK:
+            return {"text": "", "finish_reason": POLICY_BLOCK}
         if out:
             return {"text": out.strip(), "finish_reason": "stop"}
         return {"text": "", "finish_reason": f"ERROR:{error}"}
@@ -440,6 +465,10 @@ class ClaudeModel:
                 else:
                     flag = ["--resume", session_id]
                 out, error = run_claude(self.base_command() + flag + ["--output-format", "text"], turn, 600)
+                if error == POLICY_BLOCK:   # saved: the conversation up to the blocked turn
+                    print(f"  claude replay: turn {k + 1}/{len(turns)} blocked by the usage-policy filter (saved)")
+                    return {"text": "", "finish_reason": POLICY_BLOCK, "stopped_at_turn": k + 1,
+                            "conversation": conversation + [{"role": "user", "content": turn}]}
                 if out is None:
                     print(f"  claude replay FAILED at turn {k + 1}/{len(turns)} (not saved, rerun to retry)")
                     return {"text": "", "finish_reason": f"ERROR:turn{k + 1}:{error}", "conversation": []}
@@ -488,7 +517,7 @@ def replay_conversations(llm, records):
         for i, output in zip(active, outputs):
             last = t == len(records[i]["user_turns"]) - 1
             reason = output["finish_reason"]
-            bad = reason in ("prompt_too_long", "thinking_cut_off") or is_failed(reason)
+            bad = reason in ("prompt_too_long", "thinking_cut_off", POLICY_BLOCK) or is_failed(reason)
             if bad and not last:
                 print(f"  WARNING: {records[i]['pid']} {records[i]['lang']} stopped at turn {t + 1}: {reason}")
             if last or bad:

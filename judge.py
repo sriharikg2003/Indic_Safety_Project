@@ -58,7 +58,7 @@ MT_BLOCK = """Machine translation of the response into English (IndicTrans2; may
 RESPONSE_LABELS = {"full_compliance", "partial_refusal", "full_refusal", "misunderstood"}
 INTENT_LABELS = {"same", "partial", "different", "refused"}
 
-SKIPPED_FINISH_REASONS = ("prompt_too_long", "thinking_cut_off")
+SKIPPED_FINISH_REASONS = ("prompt_too_long", "thinking_cut_off", "api_policy_block")
 
 
 MHJ_EN_TURNS = {}
