@@ -15,7 +15,7 @@ forms (native script, Romanised and English-mixed) and English, five open-weight
 | Path | Contents |
 |---|---|
 | `data_samples/xstest_samples.csv` | 5 XSTest contrast pairs (a harmless request and its harmful look-alike, e.g. *kill a Python process* / *kill a person*) in English and all 28 Indian forms, as used in the experiments |
-| `results/full_results.csv` | ASR, over-refusal and comprehension (%) for every form and model (Table 9 of the report) |
+| `results/full_results.csv` | ASR, over-refusal and understanding (%) for every form and model (Table 9 of the report) |
 | `results/blocked_requests_log.csv` | The 343 Claude Haiku requests blocked by the provider's usage-policy filter: condition, request ID, language, source set, label and time |
 | `*.py` | The full pipeline: translation, generation, judging, statistics and one script per experiment |
 
@@ -60,22 +60,22 @@ Each experiment script has a `generate` command (runs the models) and a `report`
 | File | Report section | What it does |
 |---|---|---|
 | `exp01_safety_gap.py` | E1 | Each request alone in English and 28 Indian forms; harm, over-refusal, misunderstanding |
-| `exp02_comprehension.py` | E2 | Comprehension check: the model translates each request into English |
+| `exp02_comprehension.py` | E2 | Understanding check: the model translates each request into English |
 | `exp03_english_meaning.py` | E2 | The request with its original English version attached |
 | `exp04_meaning_controls.py` | E3 | A sentence without meaning or a machine translation attached instead (also the 22-language run) |
-| `exp05_contradicting_meaning.py` | E4 | The English of the contrasting request attached, plus the all-English control |
+| `exp05_contradicting_meaning.py` | E4 | The English of the contrasting request attached, plus the same test with the request itself in English |
 | `exp06_self_translate.py` | E5 | The model is told to translate the request first |
 | `exp07_jailbreak_disguise.py` | E6 | WildJailbreak disguised vs plain requests, split by tactic |
 | `exp08_framing.py` | E6 | Requests inside fictional, academic, hypothetical or authority frames |
-| `exp11_cultural_phrases.py` | E7 | Requests with caste, dowry or religion terms and their harmless twins; idioms |
-| `exp12_multiturn.py` | E8 | A neutral opening turn in the request's language or in English |
-| `exp13_mhj.py` | E8 | Human-written multi-turn jailbreaks in English, Hindi and Kannada |
+| `exp12_multiturn.py` | E7 | A neutral opening turn in the request's language or in English |
+| `exp13_mhj.py` | E7 | Human-written multi-turn jailbreaks in English, Hindi and Kannada |
+| `exp11_cultural_phrases.py` | E8 | Requests with caste, dowry or religion terms and their harmless twins; idioms |
 | `exp17_thinking.py` | Reasoning traces | Runs Qwen3 and Sarvam-M with reasoning on and classifies each trace (knew and complied, missed the harm, misread) |
-| `exp16_severity.py` | Severity | Scores each harmful answer from 1 to 5, with a check using translated answers |
+| `exp16_severity.py` | Extra, not in the report | Scores each harmful answer from 1 to 5, with a check using translated answers |
 | `exp14_llama_guard.py` | Appendix | Checks the judge's harm label with Llama Guard 3 |
 | `exp15_closed_models.py` | Claude Haiku | Claude Haiku runs and the comparison with the free web chats |
-| `exp09_natural_phrasing.py` | Appendix | Literal vs natural phrasing |
-| `exp10_harm_categories.py` | Appendix | Results by harm category (Aya Red-teaming) |
+| `exp09_natural_phrasing.py` | Extra, not in the report | Literal vs natural phrasing |
+| `exp10_harm_categories.py` | Extra, not in the report | Results by harm category (Aya Red-teaming) |
 
 Example:
 
